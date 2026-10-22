@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.DS_Store
+voice_alert_log.csv
+*.pyc
+polar_alert_log.csv
+polar_status.json
+polar_status.tmp
+recordings/
+
+biomarker_data/
+.env
+.env.*
+*.pem
+*.key

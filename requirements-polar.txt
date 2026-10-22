@@ -1,0 +1,8 @@
+# Polar H10 fatigue + posture coach (backend/polar_*.py)
+bleak>=0.22
+bleakheart>=0.2
+numpy>=1.26
+# speech uses the same packages as speak_biomarker_labels.py
+pyttsx3>=2.90
+edge-tts>=7.0           # natural Microsoft voices (needs internet; falls back offline)
+requests>=2.31
