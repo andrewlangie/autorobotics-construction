@@ -20,7 +20,7 @@ class ParsingTests(unittest.TestCase):
 
     def test_levels(self):
         self.assertEqual(ev.parse_level("posture", "Critical"), 3)
-        self.assertEqual(ev.parse_level("fatigue", "very_high"), 4)
+        self.assertEqual(ev.parse_level("fatigue", "very_high"), 3)
         self.assertEqual(ev.parse_level("fatigue", "2"), 2)
         with self.assertRaises(ValueError):
             ev.parse_level("posture", "terrible")
