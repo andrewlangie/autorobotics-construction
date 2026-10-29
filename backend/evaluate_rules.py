@@ -13,7 +13,7 @@
 
    track = posture | fatigue
    label = posture: good / poor / critical      (or 1 / 2 / 3)
-           fatigue: low / medium / high / very_high   (or 1 / 2 / 3 / 4)
+           fatigue: low / medium / high   (or 1 / 2 / 3; very_high counts as high)
    cause = optional (e.g. forward_bending, side_bending, static_posture,
            cardiovascular, prolonged_exertion, heat, sleep, long_work)
    Time not covered by a label is ignored. Overlapping labels: the last one wins.
@@ -38,10 +38,10 @@ from feedback_engine import FatigueEngine, PostureEngine
 from polar_coach import EVALUATE_EVERY_S, replay_events
 
 POSTURE_NAMES = {"good": 1, "poor": 2, "bad": 2, "critical": 3}
-FATIGUE_NAMES = {"low": 1, "none": 1, "medium": 2, "high": 3, "very_high": 4, "very high": 4}
+FATIGUE_NAMES = {"low": 1, "none": 1, "medium": 2, "high": 3, "very_high": 3, "very high": 3}
 LEVEL_LABELS = {
     "posture": {1: "good", 2: "poor", 3: "critical"},
-    "fatigue": {1: "low", 2: "medium", 3: "high", 4: "very_high"},
+    "fatigue": {1: "low", 2: "medium", 3: "high"},
 }
 
 
@@ -60,7 +60,7 @@ def parse_time(text):
 def parse_level(track, text):
     text = text.strip().lower()
     if text.isdigit():
-        return int(text)
+        return min(int(text), 3) if track == "fatigue" else int(text)
     names = POSTURE_NAMES if track == "posture" else FATIGUE_NAMES
     if text not in names:
         raise ValueError(f"unknown {track} label {text!r} (use {sorted(set(names))})")
