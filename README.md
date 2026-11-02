@@ -99,17 +99,17 @@ window. Source is in `sensor/`; the built bundle is `assets/polar-panel.js`.
 ```bash
 # Try it without any hardware:
 python backend/speak_biomarker_labels.py --simulate --dry-run --speed 0   # instant, text only
-python backend/speak_biomarker_labels.py --simulate                       # 70-min shift, spoken (3 High episodes)
+python backend/speak_biomarker_labels.py --simulate                       # 40-min shift, spoken (frustration rule demo)
 
 # Live, with the poller running:
 python backend/speak_biomarker_labels.py            # announces Frustration / Mental Demand changes
-python backend/speak_biomarker_labels.py --coach    # escalating coaching messages
+python backend/speak_biomarker_labels.py --coach    # frustration feedback (3 High in a row)
 ```
 
 | Option | Meaning |
 |---|---|
-| `--coach` | Coaching mode: check-in, micro-break (20 min), required break (45 min), heat, racing heart, focus, recovery, hydration |
-| `--simulate` | Scripted 70-minute shift, no wristband needed (implies `--coach`) |
+| `--coach` | Frustration feedback after 3 consecutive High predictions (check-in, then micro-break, then required break if High continues), plus heat, racing heart, focus, recovery, hydration |
+| `--simulate` | Scripted 40-minute shift, no wristband needed (implies `--coach`) |
 | `--speed N` | Seconds per simulated minute (default 1.5; `0` = as fast as possible) |
 | `--dry-run` | Print messages instead of speaking |
 | `--lang en\|es` | English or Spanish messages |
@@ -162,15 +162,26 @@ work normally for the first ~4 minutes (fatigue baseline) -- nothing is spoken u
 | `backend/polar_coach.py` | Runs it all, speaks one message at a time, logs `polar_alert_log.csv` |
 | `backend/speech_lock.py` | Stops the Polar coach and the stress coach talking at the same time |
 
-### When feedback is spoken (team rule)
+### When feedback is spoken (assignment rule)
 
-Stress, frustration and fatigue feedback is spoken **only at High or Very High**, and
-**only on the 3rd High occurrence**: the first two are tracked (printed as
-`High occurrence 1/3: tracked, not spoken`), the third is spoken, then the count starts
-again. One occurrence = one episode; it ends after the level stays below High for 60 s.
-Medium is shown on the dashboard but never spoken. Safety alerts (heat, racing heart),
-hydration and recovery messages are not affected. Settings: `backend/notify_policy.py`.
-Posture follows the same rule: Poor/Critical are spoken only on the 3rd bad-posture occurrence.
+Frustration and fatigue are predicted as **Low, Medium or High**.
+
+- Low and Medium are **never spoken** (Medium is shown on the dashboard).
+- High-risk feedback is spoken only after **three consecutive High predictions**.
+- Any **Low or Medium prediction resets the count** to zero.
+- If High continues, the count starts again: another 3 High predictions in a row give the
+  next (escalated) message.
+
+One prediction = one minute: frustration gets one model prediction per minute-level
+wristband sample, and fatigue makes one prediction per 60 s HRV window (the engine still
+updates every 5 s for the dashboard). The console prints every prediction, e.g.
+`(fatigue prediction High 2/3 in a row: tracked, not spoken)` or
+`(fatigue prediction Medium: count reset, not spoken)`. Safety alerts (heat, racing heart),
+hydration and recovery messages are not High-risk feedback and are not affected.
+Code: `ConsecutiveHighRule` in `backend/notify_policy.py`.
+
+Posture (Team 2) still uses the older episode rule (`ThirdTimeRule`): Poor/Critical are
+spoken on the 3rd bad-posture episode.
 
 ### Fatigue + posture on the dashboard
 

@@ -21,13 +21,13 @@ from polar_simulator import simulated_events  # noqa: E402
 
 
 class FatigueRuleTests(unittest.TestCase):
-    def test_levels_need_two_of_three(self):
-        self.assertEqual(fatigue_level(0, 0, 0), 0)
-        self.assertEqual(fatigue_level(6, -16, 0), 1)       # HR + RMSSD
-        self.assertEqual(fatigue_level(12, -26, -21), 2)
+    def test_three_levels_low_medium_high(self):
+        self.assertEqual(fatigue_level(0, 0, 0), 1)         # Low
+        self.assertEqual(fatigue_level(6, -16, 0), 1)       # old "Low" band -> Low
+        self.assertEqual(fatigue_level(12, -26, -21), 2)    # Medium
         self.assertEqual(fatigue_level(12, -36, -31), 3)    # RMSSD + SDNN are enough
-        self.assertEqual(fatigue_level(30, -45, -10), 4)    # HR + RMSSD
-        self.assertEqual(fatigue_level(30, 0, 0), 0)        # only one condition
+        self.assertEqual(fatigue_level(30, -45, -10), 3)    # old "Very High" -> High
+        self.assertEqual(fatigue_level(30, 0, 0), 1)        # only one condition -> Low
 
     def test_cause_patterns(self):
         self.assertEqual(fatigue_cause(12, -30, -30), "cardiovascular")
@@ -107,8 +107,14 @@ class SimulatedShiftTests(unittest.TestCase):
             return [int(line.split("occurrence ")[1].split("/")[0])
                     for line in out.getvalue().splitlines()
                     if "tracked, not spoken" in line and f"({track} " in line]
-        cls.occurrences = occ("fatigue")
         cls.posture_occurrences = occ("posture")
+        cls.raw = out.getvalue()
+        cls.predictions = []
+        names = {"Low": 1, "Medium": 2, "High": 3}
+        for line in cls.raw.splitlines():
+            if "(fatigue prediction " in line:
+                word = line.split("(fatigue prediction ")[1].split()[0].rstrip(":")
+                cls.predictions.append((int(line.split()[1]), names[word]))
         cls.text = "\n".join(cls.lines)
 
     def test_posture_only_on_third_occurrence(self):
@@ -118,14 +124,26 @@ class SimulatedShiftTests(unittest.TestCase):
         self.assertIn("POSTURE L3 Critical Posture / Static Posture", self.text)
         self.assertEqual(self.posture_occurrences, [1, 2])
 
-    def test_fatigue_only_high_and_only_on_third_occurrence(self):
+    def test_fatigue_only_after_three_consecutive_high_predictions(self):
         fatigue = [line for line in self.lines if "FATIGUE" in line]
         self.assertNotIn("Medium Fatigue", self.text)                    # Medium is never spoken
         self.assertIn("FATIGUE L3 High Fatigue / Prolonged Physical Exertion", self.text)
-        self.assertIn("FATIGUE L4 Very High Fatigue", self.text)
-        first = int(fatigue[0].split()[1])
-        self.assertGreaterEqual(first, 33)                                # not on High #1 or #2
-        self.assertEqual(self.occurrences, [1, 2])                        # both tracked silently
+        self.assertIn("FATIGUE L3 High Fatigue (continuing)", self.text)  # still High -> escalation
+        for line in fatigue:
+            minute = int(line.split()[1])
+            run = [lv for m, lv in self.predictions if m <= minute][-3:]
+            self.assertEqual(run, [3, 3, 3])                              # 3 High in a row
+        self.assertIn("Medium: count reset", self.raw)                   # Medium resets
+        self.assertIn("High 2/3 in a row: tracked", self.raw)
+
+    def test_every_three_high_in_a_row_gives_feedback(self):
+        streak, expected = 0, 0
+        for _, level in self.predictions:
+            streak = streak + 1 if level == 3 else 0
+            if streak == 3:
+                expected, streak = expected + 1, 0
+        spoken = [line for line in self.lines if "FATIGUE" in line]
+        self.assertEqual(len(spoken), expected)
 
     def test_silent_during_baseline_and_recovery(self):
         minutes = [int(line.split()[1]) for line in self.lines]

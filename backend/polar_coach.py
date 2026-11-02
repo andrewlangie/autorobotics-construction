@@ -16,7 +16,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from fatigue_rules import HIGH
 from feedback_engine import FatigueEngine, PostureEngine, choose_primary
+
+LEVEL_NAMES = {1: "Low", 2: "Medium", 3: "High"}
 from polar_status import StatusWriter
 from speak_biomarker_labels import coach_speak
 from speech_lock import speaking
@@ -82,7 +85,8 @@ def run(events, speed, dry_run, status=None):
     fatigue, posture = FatigueEngine(), PostureEngine()
     start = next_eval = None
     last_spoken = next_status = -1e9
-    last_occ = last_pocc = 0
+    last_occ = last_pocc = n_pred = 0
+    last_level = None
     wall_start = time.time()
     for ev in events:
         t = ev[1]
@@ -108,10 +112,19 @@ def run(events, speed, dry_run, status=None):
         if t >= next_status:
             print(status_line(minute, fatigue.state, posture.state))
             next_status = t + STATUS_EVERY_S
-        occ = fatigue.state.get("occurrence", 0)
-        if occ != last_occ and 0 < occ < fatigue.rule.needed:
-            print(f"  min {minute:>3}  (fatigue High occurrence {occ}/{fatigue.rule.needed}: tracked, not spoken)")
-        last_occ = occ
+        if len(fatigue.predictions) != n_pred:  # a new fatigue prediction was made
+            n_pred = len(fatigue.predictions)
+            level = fatigue.predictions[-1][1]
+            if level == HIGH and fatigue.rule.occurrence:
+                note = f"High {fatigue.rule.occurrence}/{fatigue.rule.needed} in a row: tracked, not spoken"
+            elif level == HIGH:
+                note = f"High {fatigue.rule.needed}/{fatigue.rule.needed} in a row: feedback"
+            elif last_level == HIGH or last_occ:
+                note = f"{LEVEL_NAMES[level]}: count reset, not spoken"
+            else:
+                note = f"{LEVEL_NAMES[level]}: not spoken"
+            print(f"  min {minute:>3}  (fatigue prediction {note})")
+            last_level, last_occ = level, fatigue.rule.occurrence
         pocc = posture.state.get("occurrence", 0)
         if pocc != last_pocc and 0 < pocc < posture.rule.needed:
             print(f"  min {minute:>3}  (posture Poor occurrence {pocc}/{posture.rule.needed}: tracked, not spoken)")

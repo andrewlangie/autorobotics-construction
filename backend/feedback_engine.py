@@ -1,7 +1,10 @@
 """Decision engine for the Polar H10: fatigue (HR + HRV) and posture (accelerometer).
 
-Same pipeline as the stress/frustration engine of the other VIP team:
-    sensor data -> baseline -> % change -> level -> cause -> duration gate -> Decision
+Fatigue pipeline:
+    heartbeats -> 60 s HRV window -> % change from baseline -> Low / Medium / High
+    -> one prediction per minute -> 3 consecutive High predictions -> Decision
+Low and Medium are never spoken; a Low or Medium prediction resets the count
+(notify_policy.ConsecutiveHighRule). Posture still uses the duration gate + ThirdTimeRule.
 A Decision carries the sheet's message, closed-loop action and feedback goal.
 
 Usage (see polar_coach.py):
@@ -17,16 +20,15 @@ from dataclasses import asdict, dataclass
 import fatigue_rules as FR
 import posture_rules as PR
 from hrv import RRWindow, pct_change
-from notify_policy import ThirdTimeRule
+from notify_policy import ConsecutiveHighRule, ThirdTimeRule
 from posture_math import PostureTracker
 
-FATIGUE_REPEAT_S = 300  # TEAM-DECISION: repeat a still-active fatigue message after 5 min
 POSTURE_REPEAT_S = 120  # TEAM-DECISION: repeat a still-active posture message after 2 min
 CALM_RESET_S = 60       # level must stay <= 1 this long before the same level can fire again
 
 # Which message wins when both tracks want to speak: higher urgency first,
 # then track order (posture = immediate injury risk). TEAM-DECISION.
-URGENCY = {"fatigue": {2: 1, 3: 2, 4: 3}, "posture": {2: 1, 3: 3}}
+URGENCY = {"fatigue": {"high": 2, "escalated": 3}, "posture": {2: 1, 3: 3}}
 TRACK_ORDER = {"posture": 0, "fatigue": 1}
 
 
@@ -111,13 +113,14 @@ def _band(value, bands, higher):
 
 
 def fatigue_level(hr_pct, rmssd_pct, sdnn_pct):
-    """Highest level where at least CONDITIONS_NEEDED of the 3 thresholds are met (0 = none)."""
-    for level in (4, 3, 2, 1):
+    """Low (1), Medium (2) or High (3): highest level where at least CONDITIONS_NEEDED
+    of the 3 thresholds are met; below Medium is Low."""
+    for level in (FR.HIGH, FR.MEDIUM):
         hr_t, rmssd_t, sdnn_t = FR.LEVEL_THRESHOLDS[level]
         met = (hr_pct > hr_t) + (rmssd_pct < rmssd_t) + (sdnn_pct < sdnn_t)
         if met >= FR.CONDITIONS_NEEDED:
             return level
-    return 0
+    return FR.LOW
 
 
 def fatigue_cause(hr_pct, rmssd_pct, sdnn_pct, minutes_on_shift=0.0, skin_temp=None):
@@ -155,8 +158,10 @@ class FatigueEngine:
         self.first_metric_t = None
         self.smooth = None       # smoothed (HR%, RMSSD%, SDNN%)
         self.last_eval_t = None
-        self.gate = Gate(FR.DURATION_S, FATIGUE_REPEAT_S, FR.RAPID_JUMP, FR.RAPID_WINDOW_S)
-        self.rule = ThirdTimeRule()  # only High/Very High, spoken on the 3rd occurrence
+        self.rule = ConsecutiveHighRule()  # spoken only after 3 consecutive High predictions
+        self.next_prediction_t = None
+        self.predictions = []    # (t, level) of every fatigue prediction (one per minute)
+        self.pending = None      # triggered feedback waiting for the speaker
         self.state = {"status": "waiting for heartbeats"}
 
     def add_beat(self, t, hr, rr_ms):
@@ -201,23 +206,33 @@ class FatigueEngine:
             "hr_pct": hr_p, "rmssd_pct": rmssd_p, "sdnn_pct": sdnn_p,
             "score": fatigue_score(hr_p, rmssd_p, sdnn_p),
         }
-        self.gate.observe(t, level)
-        self.rule.observe(t, level >= 3)
-        gated = self.gate.ready(t, level)
         self.state["occurrence"] = self.rule.occurrence
-        if gated < 3:  # Medium (and below) is never spoken
-            return None
-        if not self.rule.allow(t):  # 1st / 2nd High occurrence: tracked, not spoken
-            self.gate.mark_spoken(t, gated)
-            self.state["occurrence"] = self.rule.occurrence
-            return None
+        if self.next_prediction_t is None:
+            self.next_prediction_t = t + FR.PREDICTION_EVERY_S
+        if t < self.next_prediction_t:
+            return self.pending  # not a new prediction yet (pending = deferred feedback)
+        while self.next_prediction_t <= t:
+            self.next_prediction_t += FR.PREDICTION_EVERY_S
+
+        # ---- one fatigue prediction: Low / Medium / High ----
+        self.predictions.append((t, level))
+        fired = self.rule.update(level == FR.HIGH)   # Low or Medium resets the count
         self.state["occurrence"] = self.rule.occurrence
-        message, action, goal = FR.FEEDBACK[(gated, cause)]
-        return Decision("fatigue", t, gated, FR.LEVEL_LABELS[gated], cause, FR.CAUSE_LABELS[cause],
-                        message, action, goal, URGENCY["fatigue"][gated])
+        if level != FR.HIGH:
+            self.pending = None   # Low / Medium is never spoken
+            return None
+        if not fired:
+            return self.pending   # High #1 / #2 in a row: tracked, not spoken
+        escalated = self.rule.times_fired >= 2
+        message, action, goal = (FR.ESCALATED if escalated else FR.FEEDBACK)[cause]
+        label = FR.LEVEL_LABELS[FR.HIGH] + (" (continuing)" if escalated else "")
+        self.pending = Decision("fatigue", t, FR.HIGH, label, cause, FR.CAUSE_LABELS[cause],
+                                message, action, goal,
+                                URGENCY["fatigue"]["escalated" if escalated else "high"])
+        return self.pending
 
     def mark_spoken(self, decision):
-        self.gate.mark_spoken(decision.time, decision.level)
+        self.pending = None
 
 
 # --------------------------------------------------------------------------- posture
