@@ -16,6 +16,8 @@ from sklearn.model_selection import GroupKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+from sklearn.dummy import DummyClassifier
+from sklearn.model_selection import LeaveOneGroupOut, cross_val_predict
 
 
 LABEL_ORDER = ["low", "medium", "high"]
@@ -151,6 +153,12 @@ def build_mental_demand_dataset(task_dir: Path):
 
     return pd.DataFrame(rows), used_files
 
+def participant_id(file_name: str) -> str:
+    # ADJUST to your real filenames. Example: "P07_active_high.csv" -> "P07"
+    m = re.search(r"(?:^|[_\s-])(?:p|participant)?[_\s-]?(\d+)", Path(file_name).stem, re.I)
+    if not m:
+        raise ValueError(f"Can't parse participant from {file_name}")
+    return m.group(1)
 
 def evaluate_group_cv(df: pd.DataFrame, model):
     X = df.drop(columns=["file", "label"])
