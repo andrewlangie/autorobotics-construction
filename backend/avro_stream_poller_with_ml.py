@@ -30,6 +30,15 @@ latest_sample = {
     "eda": None,
     "temp": None,
     "pulse_rate": None,
+    "scr": None,
+    "hr": None,
+    "rmssd": None,
+    "sdnn": None,
+    "repeated_failures": 0,
+    "delay_pct": 0.0,
+    "interruptions": 0,
+    "waiting_min": 0.0,
+    "clarification_requests": 0,
     "eda_time": None,
     "temp_time": None,
     "pulse_time": None,
@@ -120,6 +129,10 @@ def choose_value_col(df, kind):
             "bpm",
             "value",
         ],
+        "scr": ["scr", "skin_conductance_response", "peaks_per_minute", "value"],
+        "hr": ["hr", "heart_rate", "bpm", "value"],
+        "rmssd": ["rmssd", "RMSSD", "value"],
+        "sdnn": ["sdnn", "SDNN", "value"],
     }[kind]
 
     for c in preferred:
@@ -228,6 +241,10 @@ def pick_most_recent_participant_and_keys(s3, date_prefixes, date_strings):
     eda_o = newest_ending("_eda.csv")
     temp_o = newest_ending("_temperature.csv")
     pulse_o = newest_ending("_pulse-rate.csv")
+    scr_o = newest_ending("_scr.csv")
+    hr_o = newest_ending("_hr.csv")
+    rmssd_o = newest_ending("_rmssd.csv")
+    sdnn_o = newest_ending("_sdnn.csv")
 
     if eda_o:
         keys["eda"] = eda_o["Key"]
@@ -238,6 +255,19 @@ def pick_most_recent_participant_and_keys(s3, date_prefixes, date_strings):
     if pulse_o:
         keys["pulse"] = pulse_o["Key"]
         mods["pulse"] = pulse_o["LastModified"]
+    if scr_o:
+        keys["scr"] = scr_o["Key"]
+        mods["scr"] = scr_o["LastModified"]
+    if hr_o:
+        keys["hr"] = hr_o["Key"]
+        mods["hr"] = hr_o["LastModified"]
+    if rmssd_o:
+        keys["rmssd"] = rmssd_o["Key"]
+        mods["rmssd"] = rmssd_o["LastModified"]
+    if sdnn_o:
+        keys["sdnn"] = sdnn_o["Key"]
+        mods["sdnn"] = sdnn_o["LastModified"]
+
 
     newest_obj = max(best_objs, key=lambda x: x["LastModified"])
     newest_key_parts = newest_obj["Key"].split("/")
@@ -289,15 +319,24 @@ def poll_loop():
                 "eda": os.path.join(local_dir, "eda.csv"),
                 "temp": os.path.join(local_dir, "temperature.csv"),
                 "pulse": os.path.join(local_dir, "pulse-rate.csv"),
+                "scr": os.path.join(local_dir, "scr.csv"),
+                "hr": os.path.join(local_dir, "hr.csv"),
+                "rmssd": os.path.join(local_dir, "rmssd.csv"),
+                "sdnn": os.path.join(local_dir, "sdnn.csv"),
             }
 
             for k in paths:
-                download_key(s3, keys[k], paths[k])
-                last_mods[k] = mods[k]
+                if k in keys:
+                    download_key(s3, keys[k], paths[k])
+                    last_mods[k] = mods[k]
 
             eda_ts, eda_val = read_last_value(paths["eda"], "eda")
             temp_ts, temp_val = read_last_value(paths["temp"], "temp")
             pulse_ts, pulse_val = read_last_value(paths["pulse"], "pulse")
+            _, scr_val = read_last_value(paths["scr"], "scr") if "scr" in keys else (None, None)
+            _, hr_val = read_last_value(paths["hr"], "hr") if "hr" in keys else (None, None)
+            _, rmssd_val = read_last_value(paths["rmssd"], "rmssd") if "rmssd" in keys else (None, None)
+            _, sdnn_val = read_last_value(paths["sdnn"], "sdnn") if "sdnn" in keys else (None, None)
 
             sig = (eda_ts, temp_ts, pulse_ts, eda_val, temp_val, pulse_val)
 
@@ -312,6 +351,10 @@ def poll_loop():
                         "eda": eda_val,
                         "temp": temp_val,
                         "pulse_rate": pulse_val,
+                        "scr": scr_val,
+                        "hr": hr_val if hr_val is not None else pulse_val,
+                        "rmssd": rmssd_val,
+                        "sdnn": sdnn_val,
                         "eda_time": eda_ts,
                         "temp_time": temp_ts,
                         "pulse_time": pulse_ts,

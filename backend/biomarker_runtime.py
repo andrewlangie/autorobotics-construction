@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 
 
+import compute_frustration_percent_changes from frustration_math
+import evaluate_cause_rules from frustration_rules
+
 class LiveBiomarkerPredictor:
     def __init__(self, model_dir, max_gap_minutes=5):
         model_dir = Path(model_dir)
@@ -23,6 +26,14 @@ class LiveBiomarkerPredictor:
         self.last_participant_id = None
         self.last_timestamp = None
         self.session_minute_index = -1
+
+        self.baselines = {
+            "eda": None,
+            "scr": None,
+            "hr": None,
+            "rmssd": None,
+            "sdnn": None,
+        }
 
     def _parse_timestamp(self, sample):
         for key in ("eda_time", "temp_time", "pulse_time", "updated_at"):
@@ -67,6 +78,15 @@ class LiveBiomarkerPredictor:
         self.last_participant_id = participant_id
         self.last_timestamp = current_ts
         self.session_minute_index += 1
+
+        # Extract current physiological readings
+        eda_val = float(sample["eda"]) if sample.get("eda") is not None else np.nan
+        temp_val = float(sample["temp"]) if sample.get("temp") is not None else np.nan
+        pulse_val = float(sample["pulse_rate"]) if sample.get("pulse_rate") is not None else np.nan
+        scr_val = float(sample["scr"]) if sample.get("scr") is not None else np.nan
+        hr_val = float(sample["hr"]) if sample.get("hr") is not None else pulse_val # Fallback to pulse_rate if hr not separate
+        rmssd_val = float(sample["rmssd"]) if sample.get("rmssd") is not None else np.nan
+        sdnn_val = float(sample["sdnn"]) if sample.get("sdnn") is not None else np.nan
 
         current_point = {
             "eda": float(sample["eda"]) if sample.get("eda") is not None else np.nan,
@@ -135,6 +155,32 @@ class LiveBiomarkerPredictor:
             response["frustration"] = {
                 "label": fr_label,
                 "confidence": fr_conf,
+                "ready": True,
+                "reason": None,
+            }
+
+            # Compute percent changes and evaluate cause-aware rules
+            pcts = compute_frustration_percent_changes(
+                {"eda": cur["eda"], "scr": cur["scr"], "hr": cur["hr"], "rmssd": cur["rmssd"], "sdnn": cur["sdnn"]},
+                self.baselines
+            )
+            
+            # Extract context variables passed via sample or defaults
+            context = {
+                "repeated_failures": sample.get("repeated_failures", 0),
+                "delay_pct": sample.get("delay_pct", 0.0),
+                "interruptions": sample.get("interruptions", 0),
+                "waiting_min": sample.get("waiting_min", 0.0),
+                "clarification_requests": sample.get("clarification_requests", 0),
+            }
+            
+            cause, cause_level, cause_score = evaluate_cause_rules(pcts, context)
+
+            response["frustration"] = {
+                "label": fr_label,
+                "confidence": fr_conf,
+                "cause": cause,
+                "score": cause_score,
                 "ready": True,
                 "reason": None,
             }
