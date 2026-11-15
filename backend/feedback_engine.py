@@ -1,10 +1,13 @@
 """Decision engine for the Polar H10: fatigue (HR + HRV) and posture (accelerometer).
 
 Fatigue pipeline:
-    heartbeats -> 60 s HRV window -> % change from baseline -> Low / Medium / High
-    -> one prediction per minute -> 3 consecutive High predictions -> Decision
+    heartbeats -> 60 s HRV window -> % change from baseline -> fatigue level
+    (Low / Medium / High / Very High; by weighted score or by threshold rules, see
+    fatigue_rules.LEVEL_METHOD) -> one prediction per minute
+    -> 3 consecutive High-or-Very-High predictions -> Decision
 Low and Medium are never spoken; a Low or Medium prediction resets the count
-(notify_policy.ConsecutiveHighRule). Posture still uses the duration gate + ThirdTimeRule.
+(notify_policy.ConsecutiveHighRule). High and Very High both count toward the 3 in a row.
+Posture still uses the duration gate + ThirdTimeRule.
 A Decision carries the sheet's message, closed-loop action and feedback goal.
 
 Usage (see polar_coach.py):
@@ -113,14 +116,25 @@ def _band(value, bands, higher):
 
 
 def fatigue_level(hr_pct, rmssd_pct, sdnn_pct):
-    """Low (1), Medium (2) or High (3): highest level where at least CONDITIONS_NEEDED
-    of the 3 thresholds are met; below Medium is Low."""
-    for level in (FR.HIGH, FR.MEDIUM):
+    """Threshold-rule method (FR.LEVEL_METHOD == "rules").
+
+    Highest level (Very High, High, Medium, Low) where at least CONDITIONS_NEEDED of the
+    3 thresholds are met; below the Low thresholds is NORMAL (no fatigue)."""
+    for level in sorted(FR.LEVEL_THRESHOLDS, reverse=True):
         hr_t, rmssd_t, sdnn_t = FR.LEVEL_THRESHOLDS[level]
         met = (hr_pct > hr_t) + (rmssd_pct < rmssd_t) + (sdnn_pct < sdnn_t)
         if met >= FR.CONDITIONS_NEEDED:
             return level
-    return FR.LOW
+    return FR.NORMAL
+
+
+def level_from_score(score):
+    """Score method (FR.LEVEL_METHOD == "score"): map the 0..1 fatigue score to a level
+    using FR.SCORE_BANDS (0-0.25 Low, 0.26-0.50 Medium, 0.51-0.75 High, 0.76-1.00 Very High)."""
+    for max_score, level in FR.SCORE_BANDS:
+        if score <= max_score:
+            return level
+    return FR.VERY_HIGH
 
 
 def fatigue_cause(hr_pct, rmssd_pct, sdnn_pct, minutes_on_shift=0.0, skin_temp=None):
@@ -145,6 +159,8 @@ def fatigue_cause(hr_pct, rmssd_pct, sdnn_pct, minutes_on_shift=0.0, skin_temp=N
 
 
 def fatigue_score(hr_pct, rmssd_pct, sdnn_pct):
+    """Weighted 0..1 score: each signal is scaled against the Very High band and clamped
+    to 0..1 (an improving signal counts as 0, never as negative)."""
     parts = [max(0.0, min(1.0, v / s)) for v, s in zip((hr_pct, rmssd_pct, sdnn_pct), FR.SCORE_SCALE)]
     return sum(w * p for w, p in zip(FR.SCORE_WEIGHTS, parts))
 
@@ -158,7 +174,7 @@ class FatigueEngine:
         self.first_metric_t = None
         self.smooth = None       # smoothed (HR%, RMSSD%, SDNN%)
         self.last_eval_t = None
-        self.rule = ConsecutiveHighRule()  # spoken only after 3 consecutive High predictions
+        self.rule = ConsecutiveHighRule()  # spoken only after 3 consecutive High / Very High predictions
         self.next_prediction_t = None
         self.predictions = []    # (t, level) of every fatigue prediction (one per minute)
         self.pending = None      # triggered feedback waiting for the speaker
@@ -197,14 +213,18 @@ class FatigueEngine:
             self.smooth = tuple(a * r + (1 - a) * s for r, s in zip(raw, self.smooth))
         self.last_eval_t = t
         hr_p, rmssd_p, sdnn_p = self.smooth
-        level = fatigue_level(hr_p, rmssd_p, sdnn_p)
+        score = fatigue_score(hr_p, rmssd_p, sdnn_p)
+        if FR.LEVEL_METHOD == "score":
+            level = level_from_score(score)
+        else:
+            level = fatigue_level(hr_p, rmssd_p, sdnn_p)
         minutes = (t - self.first_t) / 60
         cause = fatigue_cause(hr_p, rmssd_p, sdnn_p, minutes, skin_temp) if level >= 2 else None
         self.state = {
             "status": "ok", "level": level, "label": FR.LEVEL_LABELS[level], "cause": cause,
             "hr": m.hr, "rmssd": m.rmssd, "sdnn": m.sdnn,
             "hr_pct": hr_p, "rmssd_pct": rmssd_p, "sdnn_pct": sdnn_p,
-            "score": fatigue_score(hr_p, rmssd_p, sdnn_p),
+            "score": score, "method": FR.LEVEL_METHOD,
         }
         self.state["occurrence"] = self.rule.occurrence
         if self.next_prediction_t is None:
@@ -214,19 +234,20 @@ class FatigueEngine:
         while self.next_prediction_t <= t:
             self.next_prediction_t += FR.PREDICTION_EVERY_S
 
-        # ---- one fatigue prediction: Low / Medium / High ----
+        # ---- one fatigue prediction: Low / Medium / High / Very High ----
         self.predictions.append((t, level))
-        fired = self.rule.update(level == FR.HIGH)   # Low or Medium resets the count
+        is_high = level >= FR.HIGH                   # High and Very High both count
+        fired = self.rule.update(is_high)            # Low or Medium resets the count
         self.state["occurrence"] = self.rule.occurrence
-        if level != FR.HIGH:
+        if not is_high:
             self.pending = None   # Low / Medium is never spoken
             return None
         if not fired:
             return self.pending   # High #1 / #2 in a row: tracked, not spoken
         escalated = self.rule.times_fired >= 2
         message, action, goal = (FR.ESCALATED if escalated else FR.FEEDBACK)[cause]
-        label = FR.LEVEL_LABELS[FR.HIGH] + (" (continuing)" if escalated else "")
-        self.pending = Decision("fatigue", t, FR.HIGH, label, cause, FR.CAUSE_LABELS[cause],
+        label = FR.LEVEL_LABELS[level] + (" (continuing)" if escalated else "")
+        self.pending = Decision("fatigue", t, level, label, cause, FR.CAUSE_LABELS[cause],
                                 message, action, goal,
                                 URGENCY["fatigue"]["escalated" if escalated else "high"])
         return self.pending

@@ -10,17 +10,38 @@ BASELINE_S = 180  # TEAM-DECISION: first 3 minutes of the shift (after 60 s of b
 SMOOTHING_S = 60  # TEAM-DECISION: % changes are averaged over ~1 min before deciding a level
 
 # ---- Fatigue level (% change from baseline) -------------------------------
-# Three levels, as the assignment requires: Low / Medium / High.
+# Four levels: Low / Medium / High / Very High (Very High added; previously it was folded
+# into High). Below the Low thresholds there is no fatigue signal (NORMAL).
 # A level fires when AT LEAST 2 OF THE 3 conditions hold (TEAM-DECISION: the sheet
 # lists all three; requiring all three almost never happens with real data).
-# The sheet's old "Low" (5 %) and "Very High" (25 %) bands are folded into Low and High.
+# The highest level whose conditions are met wins.
 LEVEL_THRESHOLDS = {  # level: (HR% above, RMSSD% below, SDNN% below)
+    4: (25, -40, -35),  # Very High
     3: (15, -35, -30),  # High
     2: (10, -25, -20),  # Medium
+    1: (5, -15, -15),   # Low
 }
-LOW, MEDIUM, HIGH = 1, 2, 3  # anything below Medium is Low
+NORMAL, LOW, MEDIUM, HIGH, VERY_HIGH = 0, 1, 2, 3, 4  # NORMAL = below the Low thresholds
 CONDITIONS_NEEDED = 2
-LEVEL_LABELS = {1: "Low Fatigue", 2: "Medium Fatigue", 3: "High Fatigue"}
+LEVEL_LABELS = {
+    0: "No Fatigue",
+    1: "Low Fatigue",
+    2: "Medium Fatigue",
+    3: "High Fatigue",
+    4: "Very High Fatigue",
+}
+
+# ---- Which method decides the level ----------------------------------------
+# "score": level comes from the weighted fatigue score below (partial credit per signal).
+# "rules": level comes from LEVEL_THRESHOLDS above ("2 of 3 conditions").
+# Switch here to compare the two on the same recording.
+LEVEL_METHOD = "score"
+SCORE_BANDS = [  # (highest score in this band, level) -- checked in order, edges inclusive
+    (0.25, LOW),        # 0.00 - 0.25
+    (0.50, MEDIUM),     # 0.26 - 0.50
+    (0.75, HIGH),       # 0.51 - 0.75
+    (1.00, VERY_HIGH),  # 0.76 - 1.00
+]
 
 # ---- Prediction rate --------------------------------------------------------
 # The engine updates every 5 s for the dashboard, but a fatigue PREDICTION (the thing
@@ -28,7 +49,7 @@ LEVEL_LABELS = {1: "Low Fatigue", 2: "Medium Fatigue", 3: "High Fatigue"}
 PREDICTION_EVERY_S = 60
 
 # ---- Fatigue score (framework "optional") ----------------------------------
-# Each part is scaled 0..1 against the old sheet's Very High band (TEAM-DECISION).
+# Each part is scaled 0..1 against the Very High band (TEAM-DECISION).
 SCORE_WEIGHTS = (0.4, 0.3, 0.3)  # HR, RMSSD, SDNN
 SCORE_SCALE = (25, -40, -35)
 
@@ -62,6 +83,8 @@ CAUSE_LABELS = {
 # Only High is ever spoken. FEEDBACK is the first High feedback (after 3 consecutive High
 # predictions). If High continues for another 3 predictions, ESCALATED is spoken instead
 # (these are the sheet's old "Very High" lines).
+# NOTE: Very High (level 4) has no separate messages yet. If you want it spoken
+# differently, add the wording here and wire it up in feedback_engine.py / notify_policy.py.
 FEEDBACK = {
     "cardiovascular": ("High fatigue detected. Slow your pace and recover.",
                        "Reduce workload intensity", "Restore physiological balance"),
