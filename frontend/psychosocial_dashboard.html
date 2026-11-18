@@ -496,7 +496,17 @@
         ['Data confidence', `${rec.dataConfidence.toFixed(0)}%`],
       ];
       if (session.mode === 'Live') {
-        signalCards.push(['Frustration conf', rec.frustrationConfidence != null ? `${rec.frustrationConfidence.toFixed(0)}%` : 'Warming up']);
+        if (rec.frustrationSource === 'rules') {
+          // Frustration comes from the DBR rules: no confidence %, show the rule inputs instead
+          const sig = rec.frustrationSignals || {};
+          const pct = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`);
+          signalCards.push(['Frustration source', rec.frustrationLabel === 'Pending' ? (rec.frustrationReason || 'Warming up') : 'DBR rules']);
+          signalCards.push(['Frustration cause', rec.frustrationCause || '—']);
+          signalCards.push(['EDA % vs baseline', pct(sig.eda_pct)]);
+          signalCards.push(['HR % vs baseline', pct(sig.hr_pct)]);
+        } else {
+          signalCards.push(['Frustration conf', rec.frustrationConfidence != null ? `${rec.frustrationConfidence.toFixed(0)}%` : 'Warming up']);
+        }
         signalCards.push(['Mental Demand conf', rec.mentalDemandConfidence != null ? `${rec.mentalDemandConfidence.toFixed(0)}%` : 'Warming up']);
       }
       signalCards.forEach(([k,v]) => {

@@ -131,6 +131,11 @@ class LiveDashboardBridge:
             'frustration_confidence': self._safe_float(frustration_info.get('confidence')),
             'mental_label': self._normalize_label(mental_info.get('label')),
             'mental_confidence': self._safe_float(mental_info.get('confidence')),
+            # rules-based frustration (frustration_rules.py) has no confidence; pass what it does give
+            'frustration_source': frustration_info.get('source'),
+            'frustration_cause': frustration_info.get('cause_label'),
+            'frustration_signals': frustration_info.get('signals') or {},
+            'frustration_reason': frustration_info.get('reason'),
         }
         self.raw_history.append(point)
 
@@ -206,6 +211,10 @@ class LiveDashboardBridge:
             'frustrationConfidence': self._pct(point['frustration_confidence']),
             'mentalDemandLabel': point['mental_label'].title() if point['mental_label'] != 'pending' else 'Pending',
             'mentalDemandConfidence': self._pct(point['mental_confidence']),
+            'frustrationSource': point.get('frustration_source'),
+            'frustrationCause': point.get('frustration_cause'),
+            'frustrationSignals': point.get('frustration_signals') or {},
+            'frustrationReason': point.get('frustration_reason'),
             'liveSampleNote': payload.get('note'),
             'sessionMinuteIndex': minute_index,
         }

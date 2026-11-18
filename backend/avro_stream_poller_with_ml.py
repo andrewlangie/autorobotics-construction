@@ -181,6 +181,32 @@ def read_last_value(csv_path, kind):
     return None, None
 
 
+def read_all_values(csv_path, kind):
+    """Every valid minute in the file as {timestamp: value}, oldest first.
+
+    Empatica uploads the aggregated-per-minute CSVs in batches (~every 10 min), so one
+    download can hold many new minutes. read_last_value() only returns the newest one;
+    this returns them all so each minute can be fed to the predictor.
+    """
+    if not os.path.exists(csv_path):
+        return {}
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return {}
+    ts_col = find_timestamp_col(df)
+    val_col = choose_value_col(df, kind)
+    if not ts_col or not val_col:
+        return {}
+    out = {}
+    for ts_raw, val in zip(df[ts_col], df[val_col]):
+        if pd.isna(val) or pd.isna(ts_raw) or looks_like_epoch_ms(val):
+            continue
+        ts = epoch_ms_to_iso(ts_raw) if looks_like_epoch_ms(ts_raw) else str(ts_raw)
+        if ts:
+            out[ts] = float(val)
+    return dict(sorted(out.items()))
+
+
 def utc_dates_to_check(days_back=1):
     now_utc = datetime.now(timezone.utc)
     return [
@@ -281,7 +307,8 @@ def pick_most_recent_participant_and_keys(s3, date_prefixes, date_strings):
 
 def poll_loop():
     s3 = make_s3_client()
-    last_sig = None
+    last_ts = None   # newest minute already fed to the predictor
+    last_pid = None
     last_mods = {}
 
     print("Polling biomarker CSV updates...")
@@ -330,46 +357,45 @@ def poll_loop():
                     download_key(s3, keys[k], paths[k])
                     last_mods[k] = mods[k]
 
-            eda_ts, eda_val = read_last_value(paths["eda"], "eda")
-            temp_ts, temp_val = read_last_value(paths["temp"], "temp")
-            pulse_ts, pulse_val = read_last_value(paths["pulse"], "pulse")
-            _, scr_val = read_last_value(paths["scr"], "scr") if "scr" in keys else (None, None)
-            _, hr_val = read_last_value(paths["hr"], "hr") if "hr" in keys else (None, None)
-            _, rmssd_val = read_last_value(paths["rmssd"], "rmssd") if "rmssd" in keys else (None, None)
-            _, sdnn_val = read_last_value(paths["sdnn"], "sdnn") if "sdnn" in keys else (None, None)
+            # Feed EVERY new minute in the download to the predictor, oldest first.
+            # (Empatica uploads ~10 minutes at a time; reading only the last row skipped
+            # the rest and made the runtime see 10-minute gaps, which reset the session.)
+            if pid != last_pid:
+                last_ts, last_pid = None, pid
+            series = {k: read_all_values(paths[k], k) for k in paths if k in keys}
+            new_minutes = [t for t in series.get("eda", {}) if last_ts is None or t > last_ts]
 
-            sig = (
-                eda_ts, temp_ts, pulse_ts,
-                eda_val, temp_val, pulse_val,
-                scr_val, hr_val, rmssd_val, sdnn_val,
-            )
-
-            if sig == last_sig:
-                latest_sample["note"] = (
-                    "S3 updated but last valid value unchanged (no new minute row yet)"
-                )
-                print("[DEBUG] last valid value unchanged:", sig)
+            if not new_minutes:
+                latest_sample["note"] = "S3 updated but no new minute rows yet"
+                print("[DEBUG] no new minute rows since", last_ts)
             else:
-                latest_sample.update(
-                    {
-                        "eda": eda_val,
-                        "temp": temp_val,
-                        "pulse_rate": pulse_val,
-                        "scr": scr_val,
-                        "hr": hr_val if hr_val is not None else pulse_val,
-                        "rmssd": rmssd_val,
-                        "sdnn": sdnn_val,
-                        "eda_time": eda_ts,
-                        "temp_time": temp_ts,
-                        "pulse_time": pulse_ts,
-                        "participant_id": pid,
-                        "source_prefix": used_prefix if used_prefix else prefixes[0],
-                        "updated_at": datetime.now().isoformat(timespec="seconds"),
-                        "note": "new minute detected",
-                    }
-                )
-                latest_sample["predictions"] = predictor.update(latest_sample)
-                last_sig = sig
+                for ts in new_minutes:
+                    val = {k: series[k].get(ts) for k in series}
+                    pulse_val = val.get("pulse")
+                    hr_val = val.get("hr")
+                    latest_sample.update(
+                        {
+                            "eda": val.get("eda"),
+                            "temp": val.get("temp"),
+                            "pulse_rate": pulse_val,
+                            "scr": val.get("scr"),
+                            "hr": hr_val if hr_val is not None else pulse_val,
+                            "rmssd": val.get("rmssd"),
+                            "sdnn": val.get("sdnn"),
+                            "eda_time": ts,
+                            "temp_time": ts,
+                            "pulse_time": ts,
+                            "participant_id": pid,
+                            "source_prefix": used_prefix if used_prefix else prefixes[0],
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                            "note": "new minute detected",
+                        }
+                    )
+                    latest_sample["predictions"] = predictor.update(latest_sample)
+                    last_ts = ts
+                fr = (latest_sample["predictions"] or {}).get("frustration") or {}
+                print(f"Processed {len(new_minutes)} new minute(s) up to {last_ts}; "
+                      f"frustration={fr.get('label')} reason={fr.get('reason')}")
                 print("Updated /latest:", latest_sample)
 
         except Exception as e:
