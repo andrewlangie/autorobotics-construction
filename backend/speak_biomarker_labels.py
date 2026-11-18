@@ -5,6 +5,10 @@ Polls the live biomarker endpoint served by `avro_stream_poller_with_ml.py`
 (from the VIP_psychological_dashboard project) and reads new Frustration /
 Mental Demand label updates aloud using offline text-to-speech (pyttsx3).
 
+NOTE: Frustration comes from the rules in frustration_rules.py, computed on the Empatica
+wristband feed only (percent change from a personal baseline). Those predictions have no
+confidence (None, which the coach accepts) and carry a "cause" that selects the wording.
+
 WHY pyttsx3:
 - Runs fully offline, no API key or network call needed per utterance
 - Works on Windows (SAPI5), macOS (NSSpeechSynthesizer), and Linux (espeak)
@@ -372,6 +376,42 @@ COACH_MESSAGES = {
 FRUSTRATION_ALERTS = {"checkin", "microbreak", "required_break"}
 FRUSTRATION_TIERS = {1: "checkin", 2: "microbreak"}  # 3rd+ time in one High run -> required_break
 
+# Cause-specific wording for frustration feedback. The cause comes from
+# backend/frustration_rules.py (rules on the Empatica feed). When the cause is missing or
+# has no entry here, the generic COACH_MESSAGES wording is used. {name} and {minutes}
+# are filled in the same way as in COACH_MESSAGES.
+# TEAM-DECISION: Spanish cause messages are not written yet; "es" falls back to generic.
+CAUSE_MESSAGES = {
+    "en": {
+        "rework": {
+            "checkin": ["Redoing work is frustrating{name}. How are you doing? Take a breath before the next attempt."],
+            "microbreak": ["{minutes} minutes of repeated rework{name}. Take a two minute break, then look at the task with fresh eyes."],
+            "required_break": ["{minutes} minutes of rework and rising frustration{name}. Please take a required break and ask your supervisor to review the task."],
+        },
+        "schedule_pressure": {
+            "checkin": ["The schedule is tight today{name}. How are you holding up? Stay steady, one task at a time."],
+            "microbreak": ["{minutes} minutes under schedule pressure{name}. Take a short break; a clear head is faster."],
+            "required_break": ["{minutes} minutes of schedule pressure{name}. Please take a required break and let your supervisor know about the delay."],
+        },
+        "equipment": {
+            "checkin": ["Equipment trouble can be frustrating{name}. How are you doing? Check whether it can be swapped or fixed."],
+            "microbreak": ["{minutes} minutes fighting with the equipment{name}. Take a short break and ask for a replacement tool."],
+            "required_break": ["{minutes} minutes of equipment problems{name}. Please take a required break and report the faulty tool."],
+        },
+        "material_shortage": {
+            "checkin": ["Waiting on materials is frustrating{name}. How are you doing? Let your supervisor know what you need."],
+            "microbreak": ["{minutes} minutes waiting on materials{name}. Use the time for a short break and ask for an update."],
+            "required_break": ["{minutes} minutes of waiting and frustration{name}. Please take a required break and escalate the material shortage."],
+        },
+        "poor_communication": {
+            "checkin": ["Unclear instructions are frustrating{name}. How are you doing? Ask for clarification before continuing."],
+            "microbreak": ["{minutes} minutes of confusion{name}. Take a short break, then ask your supervisor to confirm the instructions."],
+            "required_break": ["{minutes} minutes of unclear communication{name}. Please take a required break and get the instructions clarified."],
+        },
+    },
+    "es": {},
+}
+
 # Priority (higher wins) and voice tone for each alert.
 COACH_ALERTS = {
     "required_break": (100, "firm"),
@@ -445,7 +485,9 @@ class VoiceCoach:
         Return (alert_key, context) for the most important alert, or (None, context)."""
         cfg, s = self.cfg, self.s
         preds = sample.get("predictions") or {}
-        fr = coach_label(preds.get("frustration"), cfg["min_confidence"])
+        fr_pred = preds.get("frustration")
+        fr = coach_label(fr_pred, cfg["min_confidence"])  # rules: confidence None passes
+        cause = (fr_pred or {}).get("cause")
         md = coach_label(preds.get("mental_demand"), cfg["min_confidence"])
         level = LEVEL.get(fr)
         pulse = sample.get("pulse_rate")
@@ -516,7 +558,7 @@ class VoiceCoach:
         ):
             candidates.append(("hydration", {}))
 
-        ctx_base = {"fr": fr, "md": md, "level": level, "note": note}
+        ctx_base = {"fr": fr, "md": md, "level": level, "note": note, "cause": cause}
         if not candidates:
             return None, ctx_base
 
@@ -627,6 +669,7 @@ def log_alert(sample, key, ctx, text):
                     "pulse_rate",
                     "skin_temp",
                     "message",
+                    "cause",
                 ]
             )
         w.writerow(
@@ -639,6 +682,7 @@ def log_alert(sample, key, ctx, text):
                 sample.get("pulse_rate"),
                 sample.get("temp"),
                 text,
+                ctx.get("cause"),
             ]
         )
 
@@ -677,8 +721,11 @@ def simulated_samples(seconds_per_minute):
     Medium (never spoken), High x2 then Medium (reset), High x2 then Low (reset),
     High x9 in a row (feedback at the 3rd, 6th and 9th), heat spike, then recovery."""
 
-    def pred(label, conf=0.8):
-        return {"label": label, "confidence": conf, "ready": True}
+    def pred(label, conf=0.8, cause=None):
+        out = {"label": label, "confidence": conf, "ready": True}
+        if cause:
+            out["cause"] = cause
+        return out
 
     start = datetime.now()
     print(
@@ -686,20 +733,23 @@ def simulated_samples(seconds_per_minute):
     )
     for m in range(41):
         pulse, temp, md = 88, 33.0, "low"
+        cause = None
         if m < 5:
             fr, pulse = "low", 82
         elif m < 9:
-            fr = "medium"                    # Medium: shown, never spoken
+            fr, cause = "medium", "poor_communication"  # Medium: shown, never spoken
         elif m < 11:
-            fr = "high"                      # High 1/3, 2/3: tracked
+            fr, cause = "high", "equipment"      # High 1/3, 2/3: tracked
         elif m < 13:
-            fr = "medium"                    # reset by Medium
+            fr, cause = "medium", "equipment"    # reset by Medium
         elif m < 15:
-            fr = "high"                      # High 1/3, 2/3: tracked
+            fr, cause = "high", "rework"         # High 1/3, 2/3: tracked
         elif m < 18:
             fr = "low"                       # reset by Low
         elif m < 27:
-            fr, pulse = "high", 104          # High x9: feedback at 3rd, 6th, 9th
+            # High x9: feedback at 3rd, 6th, 9th (rework, then material shortage)
+            fr, pulse = "high", 104
+            cause = "rework" if m < 24 else "material_shortage"
             if 22 <= m <= 23:
                 pulse, temp = 118, 35.6      # hot afternoon, heat strain
         elif m < 32:
@@ -712,7 +762,7 @@ def simulated_samples(seconds_per_minute):
                 "pulse_rate": pulse,
                 "temp": temp,
                 "predictions": {
-                    "frustration": pred(fr),
+                    "frustration": pred(fr, None, cause),  # rules: no confidence
                     "mental_demand": pred(md, 0.7),
                 },
             },
@@ -742,7 +792,10 @@ def run_coach(args) -> None:
                 f"pulse={sample.get('pulse_rate')} temp={sample.get('temp')}  (quiet){note}"
             )
             continue
-        options = COACH_MESSAGES[args.lang][key]
+        options = (
+            CAUSE_MESSAGES.get(args.lang, {}).get(ctx.get("cause"), {}).get(key)
+            or COACH_MESSAGES[args.lang][key]
+        )
         template = random.choice(options) if args.vary else options[0]
         text = template.format(name=name, **ctx)
         print(f"  min {minute:>3}  -> {key.upper()}{note}")
